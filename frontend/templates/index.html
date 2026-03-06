@@ -1,22 +1,107 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
-    <title>Organizador CutPro</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema Integrado - Fábrica</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
 <div class="container">
-    <h1>Organizador de Folhas CutPro</h1>
+    <h1 style="text-align: center;">Painel de Organização de PDFs</h1>
+    
+    <div class="grid-container">
+        
+        <div class="card">
+            <h2>Organizador de Folhas CutPro</h2>
+            <p>Reordena as páginas dos PDFs com base na maior área encontrada.</p>
+            <form id="formCorte">
+                <input type="file" id="arquivo_pdf_corte" accept=".pdf" multiple required>
+                <button type="submit" id="btnCorte">Organizar PDF(s)</button>
+            </form>
+            <div id="statusCorte" class="status-msg"></div>
+        </div>
 
-    <form id="uploadForm">
-        <input type="file" name="file" accept=".pdf" required>
-        <button type="submit">Organizar PDF</button>
-    </form>
+        <div class="card">
+            <h2>Organizador de Lotes e Sobras</h2>
+            <p>Agrupa itens da lista de compras pelo último número do código.</p>
+            <form id="formSobras">
+                <input type="file" id="arquivo_pdf_sobras" accept=".pdf" multiple required>
+                <button type="submit" id="btnSobras">Organizar PDF(s)</button>
+            </form>
+            <div id="statusSobras" class="status-msg"></div>
+        </div>
 
-    <div id="status"></div>
+    </div>
 </div>
 
-<script src="/static/script.js"></script>
+<script>
+    // Função genérica que serve para as duas ferramentas da fábrica
+    async function enviarFormularioLote(event, inputId, btnId, statusId, rota, nomePdfUnico, nomeZipLote) {
+        event.preventDefault();
+        
+        const fileInput = document.getElementById(inputId);
+        const btnEnviar = document.getElementById(btnId);
+        const status = document.getElementById(statusId);
+        
+        if (fileInput.files.length === 0) return;
+
+        // Anexa todos os arquivos selecionados
+        const formData = new FormData();
+        for (let i = 0; i < fileInput.files.length; i++) {
+            formData.append('arquivos', fileInput.files[i]);
+        }
+
+        btnEnviar.disabled = true;
+        btnEnviar.innerText = "Processando Lote, aguarde...";
+        status.innerText = "";
+
+        try {
+            const response = await fetch(rota, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.ok) {
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                
+                // Decide se baixa um PDF normal ou um ZIP baseado na quantidade de arquivos
+                // Nomeia exatamente: NomeDoArquivo + " organizado.pdf"
+                a.download = fileInput.files.length > 1 ? nomeZipLote : (fileInput.files[0].name.replace('.pdf', '') + nomePdfUnico);
+                
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                
+                status.innerText = "✅ Sucesso! O download começou.";
+                status.style.color = "#3b82f6";
+            } else {
+                status.innerText = "❌ Ocorreu um erro ao processar os arquivos.";
+                status.style.color = "#ef4444";
+            }
+        } catch (error) {
+            status.innerText = "❌ Erro de conexão com o servidor.";
+            status.style.color = "#ef4444";
+        } finally {
+            btnEnviar.disabled = false;
+            btnEnviar.innerText = "Organizar PDF(s)";
+            fileInput.value = ""; // Limpa os arquivos para o próximo uso
+        }
+    }
+
+    // Passando o texto exato que será adicionado ao nome original
+    document.getElementById('formCorte').addEventListener('submit', (e) => {
+        enviarFormularioLote(e, 'arquivo_pdf_corte', 'btnCorte', 'statusCorte', '/organizar_corte', ' organizado.pdf', 'Lotes organizados.zip');
+    });
+
+    document.getElementById('formSobras').addEventListener('submit', (e) => {
+        enviarFormularioLote(e, 'arquivo_pdf_sobras', 'btnSobras', 'statusSobras', '/organizar_sobras', ' organizado.pdf', 'Lotes organizados.zip');
+    });
+</script>
+
 </body>
 </html>
