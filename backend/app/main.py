@@ -8,6 +8,7 @@ import os
 import zipfile
 import pdfplumber
 import re
+import csv
 
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
@@ -126,6 +127,7 @@ def extrair_cabecalho_limpo(pdf_path):
         if match_cliente:
             cliente = match_cliente.group(1).strip()
 
+        # Extrai a data e hora para colocar no canto do PDF
         match_data = re.search(
             r'Data/Hora:\s*(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2})',
             texto_limpo,
@@ -135,6 +137,7 @@ def extrair_cabecalho_limpo(pdf_path):
         if match_data:
             data_hora = match_data.group(1).strip()
 
+        # Lê o Projeto inteiro (ignorando que a Data/Hora está no meio)
         match_projeto = re.search(
             r'Projeto:\s*(.*?)(?=Chapas\b|Sobras\b|Descrição\b|$)',
             texto_limpo,
@@ -142,7 +145,19 @@ def extrair_cabecalho_limpo(pdf_path):
         )
 
         if match_projeto:
-            projeto = re.sub(r'\s+', ' ', match_projeto.group(1)).strip()
+            projeto_bruto = match_projeto.group(1)
+            
+            # CIRURGIA: Procura o bloco "Data/Hora: 00/00/0000 00:00" e apaga ele do meio do texto
+            projeto_limpo = re.sub(
+                r'Data/Hora:\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', 
+                '', 
+                projeto_bruto, 
+                flags=re.IGNORECASE
+            )
+            
+            # Limpa espaços duplos que possam ter ficado onde a data estava
+            projeto = re.sub(r'\s+', ' ', projeto_limpo).strip()
+            projeto = projeto.rstrip('- ')
 
     return cliente, projeto, data_hora
 
@@ -279,30 +294,34 @@ def organizar_pdf_sobras(caminho_entrada, caminho_saida):
 
                         dados_mestre.append(linha_filtrada)
 
-    # 244x122 primeiro
-
-    primeiro_item = None
+# =========================================================
+    # SEPARA E ORDENA AS PEÇAS DE 244x122 PARA O TOPO
+    # =========================================================
+    chapas_inteiras = []
+    outras_sobras = []
 
     for item in dados_mestre:
+        # Pega as colunas onde normalmente ficam as medidas (Largura, Altura e Profundidade)
+        # Assim garantimos que ele vai achar o 244 e o 122 não importa a ordem
+        medidas = [str(item[1]).strip(), str(item[2]).strip(), str(item[3]).strip()]
+        
+        # Confere se os números 244 e 122 existem nessas colunas
+        tem_244 = any("244" in m for m in medidas)
+        tem_122 = any("122" in m for m in medidas)
 
-        largura = str(item[2])
-        altura = str(item[3])
+        if tem_244 and tem_122:
+            chapas_inteiras.append(item)
+        else:
+            outras_sobras.append(item)
 
-        if "244" in largura and "122" in altura:
+    # Ordena o resto das peças usando a regra do último número do código
+    outras_sobras_organizadas = sorted(outras_sobras, key=extrair_grupo_codigo)
+    
+    # Ordena as chapas 244x122 entre si também (caso haja várias)
+    chapas_inteiras_organizadas = sorted(chapas_inteiras, key=extrair_grupo_codigo)
 
-            primeiro_item = item
-            break
-
-    if primeiro_item:
-        dados_mestre.remove(primeiro_item)
-
-    dados_organizados = sorted(
-        dados_mestre,
-        key=extrair_grupo_codigo
-    )
-
-    if primeiro_item:
-        dados_organizados.insert(0, primeiro_item)
+    # Junta as duas listas, travando as chapas inteiras de vez na primeira página
+    dados_organizados = chapas_inteiras_organizadas + outras_sobras_organizadas
 
     largura_pagina, altura_pagina = A4
 
@@ -388,6 +407,94 @@ def organizar_pdf_sobras(caminho_entrada, caminho_saida):
         canvasmaker=NumeracaoCanvas
     )
 
+
+# =========================================================
+# ORGANIZAR CSV (NOVO MÓDULO)
+# =========================================================
+import re
+
+def ler_arquivo_seguro(caminho):
+    """Tenta ler o arquivo com várias codificações até dar certo, evitando letras asiáticas/alienígenas"""
+    codificacoes = ['utf-16', 'utf-8-sig', 'cp1252', 'iso-8859-1']
+    for cod in codificacoes:
+        try:
+            with open(caminho, 'r', encoding=cod) as f:
+                conteudo = f.read()
+                # Se o arquivo for lido com sucesso e não tiver bytes nulos invisíveis
+                if '\x00' not in conteudo:
+                    return conteudo
+        except Exception:
+            continue
+    
+    # Fallback de segurança se tudo falhar
+    with open(caminho, 'r', encoding='utf-8', errors='ignore') as f:
+        return f.read()
+
+def organizar_csv_app(caminho_entrada, caminho_saida):
+    linhas_processadas = []
+    
+    # Chama a função inteligente para ler o arquivo
+    conteudo = ler_arquivo_seguro(caminho_entrada)
+    
+    if not conteudo or not conteudo.strip():
+        return
+
+    linhas = conteudo.strip().split('\n')
+    
+    primeira_linha = linhas[0]
+    contagens = {'\t': primeira_linha.count('\t'), ';': primeira_linha.count(';'), ',': primeira_linha.count(',')}
+    separador = max(contagens, key=contagens.get)
+    if contagens[separador] == 0:
+        separador = ';'
+    
+    for linha in linhas:
+        linha = linha.strip()
+        if not linha:
+            continue
+            
+        colunas = linha.split(separador)
+        
+        if len(colunas) >= 4:
+            nomenclatura_original = colunas[0].strip()
+            nomenclatura_limpa = re.sub(r'[^A-Za-z0-9]', '', nomenclatura_original).upper()
+            
+            if 'NOMENCLATURA' in nomenclatura_limpa:
+                continue
+            
+            if nomenclatura_limpa == 'T' or not nomenclatura_limpa:
+                continue
+                
+            nomenclatura_final = nomenclatura_original.strip('"').strip("'")
+            
+            quantidade = re.sub(r'[^0-9]', '', colunas[1])
+            if not quantidade:
+                continue
+
+            largura = re.sub(r'[^0-9,]', '', colunas[2].replace('.', ','))
+            altura = re.sub(r'[^0-9,]', '', colunas[3].replace('.', ','))
+            
+            # Formatação de zeros decimais
+            if ',' in largura:
+                partes = largura.split(',')
+                decimal = partes[1].rstrip('0')
+                largura = f"{partes[0]},{decimal}" if decimal else partes[0]
+            if not largura: largura = "0"
+
+            if ',' in altura:
+                partes = altura.split(',')
+                decimal = partes[1].rstrip('0')
+                altura = f"{partes[0]},{decimal}" if decimal else partes[0]
+            if not altura: altura = "0"
+            
+            novo_valor = "1,8" 
+            
+            linha_texto = f"{nomenclatura_final};{quantidade};{largura};{altura};{novo_valor}"
+            linhas_processadas.append(linha_texto)
+    
+    # Salva puro no padrão Windows, como você fez manualmente
+    with open(caminho_saida, 'w', encoding='cp1252', errors='replace') as f:
+        for l in linhas_processadas:
+            f.write(l + "\n")
 
 # =========================================================
 # ROTAS
@@ -541,6 +648,52 @@ async def processar_sobras(arquivos: List[UploadFile] = File(...)):
             zipfile.ZIP_DEFLATED
         ) as zipf:
 
+            for caminho, nome in arquivos_processados:
+                zipf.write(caminho, arcname=nome)
+
+        return FileResponse(
+            zip_filepath,
+            filename=zip_filename,
+            media_type="application/zip"
+        )
+
+
+# FORMATAR CSV
+@app.post("/organizar_csv")
+async def processar_csv(arquivos: List[UploadFile] = File(...)):
+    if not arquivos or not arquivos[0].filename:
+        return {"erro": "Nenhum arquivo enviado"}
+
+    arquivos_processados = []
+
+    for arquivo_csv in arquivos:
+        nome_base, extensao = os.path.splitext(arquivo_csv.filename)
+        # Limpa o nome para retirar a palavra original e substitui por modificado
+        nome_base_limpo = nome_base.replace(" original", "").strip()
+        nome_download = f"{nome_base_limpo} modificado.csv"
+
+        caminho_entrada = os.path.join(UPLOAD_DIR, "entrada_csv_" + arquivo_csv.filename)
+        caminho_saida = os.path.join(OUTPUT_DIR, nome_download)
+
+        with open(caminho_entrada, "wb") as buffer:
+            shutil.copyfileobj(arquivo_csv.file, buffer)
+
+        # Chama a função de formatação do CSV
+        organizar_csv_app(caminho_entrada, caminho_saida)
+
+        arquivos_processados.append((caminho_saida, nome_download))
+
+    if len(arquivos_processados) == 1:
+        return FileResponse(
+            arquivos_processados[0][0],
+            filename=arquivos_processados[0][1],
+            media_type="text/csv"
+        )
+    else:
+        zip_filename = "CSVs_Formatados.zip"
+        zip_filepath = os.path.join(OUTPUT_DIR, zip_filename)
+
+        with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for caminho, nome in arquivos_processados:
                 zipf.write(caminho, arcname=nome)
 
